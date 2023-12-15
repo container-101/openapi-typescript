@@ -12,6 +12,7 @@ export default function createClient(clientOptions) {
     fetch: baseFetch = globalThis.fetch,
     querySerializer: globalQuerySerializer,
     bodySerializer: globalBodySerializer,
+    middleware,
     ...baseOptions
   } = clientOptions ?? {};
   let baseUrl = baseOptions.baseUrl ?? "";
@@ -25,7 +26,7 @@ export default function createClient(clientOptions) {
    * @param {import('./index.js').FetchOptions<T>} fetchOptions
    */
   async function coreFetch(url, fetchOptions) {
-    const {
+    let {
       fetch = baseFetch,
       headers,
       body: requestBody,
@@ -49,15 +50,37 @@ export default function createClient(clientOptions) {
       params.header,
     );
 
-    // fetch!
+    // requestInit
     /** @type {RequestInit} */
-    const requestInit = {
+    let requestInit = {
       redirect: "follow",
       ...baseOptions,
       ...init,
       headers: finalHeaders,
     };
 
+    // middleware (request)
+    const mergedOptions = {
+      baseUrl,
+      fetch,
+      parseAs,
+      querySerializer,
+      bodySerializer,
+    };
+    if (Array.isArray(middleware)) {
+      for (const m of middleware) {
+        const result = await m({
+          type: "request",
+          req: { ...requestInit, url: finalURL, params },
+          options: Object.freeze({ ...mergedOptions }),
+        });
+        if (result) {
+          requestInit = result;
+        }
+      }
+    }
+
+    // fetch!
     if (requestBody) {
       requestInit.body = bodySerializer(requestBody);
     }
@@ -66,7 +89,22 @@ export default function createClient(clientOptions) {
       finalHeaders.delete("Content-Type");
     }
 
-    const response = await fetch(finalURL, requestInit);
+    let response = await fetch(requestInit.url ?? finalURL, requestInit);
+
+    // middleware (response)
+    if (Array.isArray(middleware)) {
+      // execute in reverse-array order (first priority gets last transform)
+      for (let i = middleware.length - 1; i >= 0; i--) {
+        const result = await middleware[i]({
+          type: "response",
+          res: response,
+          options: Object.freeze({ ...mergedOptions }),
+        });
+        if (result) {
+          response = result;
+        }
+      }
+    }
 
     // handle empty content
     // note: we return `{}` because we want user truthy checks for `.data` or `.error` to succeed
